@@ -188,26 +188,36 @@ async def search(text):
                                    safe_call(ashanAPI(text)))
                                    
     print(time()-one)
+    final_result_1 = {}
     final_result = [item for sublist in results if sublist for item in sublist]
-    return JSONResponse(final_result)
+    final_result_1['result'] = final_result 
+    return JSONResponse(final_result_1)
 
 @app.get("/magnit/{text}")
 async def magnit(text):
     result = await magnitAPI(text)
-    return JSONResponse(result)
+    result_1 = {}
+    result_1['result'] = result 
+    return JSONResponse(result_1)
 
 @app.get("/lenta/{text}")
 async def lenta(text):
     result = await lentaAPI(text)
-    return JSONResponse(result)
+    result_1 = {}
+    result_1['result'] = result 
+    return JSONResponse(result_1)
 
 @app.get("/perekrestok/{text}")
 async def magnit(text):
     perekrestok = PerekrestokAPI()
     result = await perekrestok.parse(text)
-    return JSONResponse(result)
+    result_1 = {}
+    result_1['result'] = result 
+    return JSONResponse(result_1)
 
 @app.get("/ashan/{text}")
 async def ashat(text):
     result = await ashanAPI(text)
-    return JSONResponse(result)
+    result_1 = {}
+    result_1['result'] = result 
+    return JSONResponse(result_1)
