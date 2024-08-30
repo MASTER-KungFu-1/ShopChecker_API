@@ -1,99 +1,136 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import asyncio
 import aiohttp
 from json import loads
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from urllib.parse import unquote_plus
 from json import dumps
+
+import asyncio
+import aiohttp
 from time import time
+
 app = FastAPI()
 
+timeout = aiohttp.ClientTimeout(total=5)
+app = FastAPI()
 
-timeout=aiohttp.ClientTimeout(total=5)
-async def lentaAPI(text):
-    headers =  {
-        'Accept': 'application/json',
-        'Accept-Encoding': 'gzip, deflate, br, zstd',
-        'Accept-Language': 'ru,en;q=0.9',
-        'Connection': 'keep-alive',
-        'Host': 'lenta.com',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 YaBrowser/24.6.0.0 Safari/537.36',
-        'X-Forward-Monolith': 'true',
-        'X-Forward-Monolith': 'true',
-        'X-NewRelic-ID': 'undefined',
-        'newrelic': 'eyJ2IjpbMCwxXSwiZCI6eyJ0eSI6IkJyb3dzZXIiLCJhYyI6IjEwMDAwMDAiLCJhcCI6IjMzMjQxMTMiLCJpZCI6ImNlODlmMzlmMGM1ZmNjMTAiLCJ0ciI6IjRlYWQ2OGQ1OGQ3MzZmOGJkMGNmNWUwNmY3MTc4NmIwIiwidGkiOjE3MjE5MzA1MjgwNzN9fQ==',
-    }
-    params = {
-        'value': text,
-        'searchSource': 'Sku'
-    }
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get('https://lenta.com/api/v1/search',headers=headers, params=params) as response:
-            products = await response.json()
-    items = [{
-        "name": item['title'],
-        "store_name": "Лента",
-        "image_url": item['imageUrl'],
-        "actionDate": "",
-        "discountPercent": f"-{round(100 - float(item['price'])  * 100 / float(item['oldPrice']))}%" if item.get('oldPrice') else None,
-        "discount": True if item['hasDiscount'] == 'True' else False,
-        "price": item['cardPrice']['value'],
-        "oldprice": item['regularPrice']['value'],
-        'card_title' : 'Скидка по карте Лента',
-        'category':item['gaCategory'],
-    } for item in products['skus']]
-    return items
+class RecommendationSystem:
+    def __init__(self):
+        self.clusters = []
+        self.vectorizer = TfidfVectorizer(preprocessor=self.synonym_replacer)
+        self.products = []  
+        self.similarity_matrix = None
 
-        
+    def synonym_replacer(self, text):
+        synonyms = {
+            "кола": "cola",
+            "Cola": "cola",
+            "cola": "cola",
+            # Добавьте другие синонимы, если нужно
+        }
+        for word, replacement in synonyms.items():
+            text = text.replace(word, replacement)
+        return text
+
+    def preprocess_products(self):
+        # Используем только название для векторизации
+        X = self.vectorizer.fit_transform([p['name'] for p in self.products])
+        self.similarity_matrix = cosine_similarity(X)
+
+    def cluster_products(self, threshold=0.55):
+        visited = set()
+        self.clusters.clear()
+        for i in range(len(self.products)):
+            if i in visited:
+                continue
+            cluster = [self.products[i]]
+            visited.add(i)
+            for j in range(i + 1, len(self.products)):
+                if self.similarity_matrix[i][j] > threshold:
+                    cluster.append(self.products[j])
+                    visited.add(j)
+            self.clusters.append(cluster)
+
+    async def add_new_products(self, new_products):
+        added = False
+        for product in new_products:
+            if product not in self.products:
+                self.products.append(product)
+                added = True
+        if added:
+            self.preprocess_products()
+            self.cluster_products()
+
+    async def find_closest_cluster(self, product_name):
+        if not self.products:
+            raise HTTPException(status_code=404, detail="No products available for clustering")
+
+        vector = self.vectorizer.transform([self.synonym_replacer(product_name)])
+        similarity_scores = cosine_similarity(vector, self.vectorizer.transform([p['name'] for p in self.products])).flatten()
+
+        closest_cluster = None
+        max_similarity = 0
+        for cluster in self.clusters:
+            cluster_similarity = max([similarity_scores[self.products.index(prod)] for prod in cluster])
+            if cluster_similarity > max_similarity:
+                max_similarity = cluster_similarity
+                closest_cluster = cluster
+
+        if closest_cluster:
+            return {"cluster": closest_cluster}
+        else:
+            return {"cluster": []}
+
+recommendation_system = RecommendationSystem()
+
 async def ashanAPI(text):
     params = {
-        'apiKey':'06U4652632',
-        'strategy':'advanced_xname,zero_queries',
-        'fullData':'true',
-        'withCorrection':'true',
-        'withFacets':'true',
-        'treeFacets':'true',
-        'regionId':'1',
-        'useCategoryPrediction':'0.2',
-        'preview':'false',
-        'withSku':'false',
-        'sort':'DEFAULT'
+        'apiKey': '06U4652632',
+        'strategy': 'advanced_xname,zero_queries',
+        'fullData': 'true',
+        'withCorrection': 'true',
+        'withFacets': 'true',
+        'treeFacets': 'true',
+        'regionId': '1',
+        'useCategoryPrediction': '0.2',
+        'preview': 'false',
+        'withSku': 'false',
+        'sort': 'DEFAULT'
     }
     params["st"] = text
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get('https://sort.diginetica.net/search',params=params) as response:
+        async with session.get('https://sort.diginetica.net/search', params=params) as response:
             products = await response.json()
     items = [{
         "name": item['name'],
         "store_name": "Ашан",
         "image_url": item['image_url'],
         "actionDate": "",
-        "discountPercent": f"-{round(100 - float(item['price'])  * 100 / float(item['oldPrice']))}%" if item.get('oldPrice') else None,
+        "discountPercent": f"-{round(100 - float(item['price']) * 100 / float(item['oldPrice']))}%" if item.get('oldPrice') else None,
         "discount": True if item.get('oldPrice') else False,
         "price": item['price'],
         "oldprice": item.get('oldPrice')
     } for item in products['products']]
     return items
 
-
 async def magnitAPI(name):
     headers = {
-        'host':'magnit.ru',
-        'x-device-tag':'disabled',
-        'x-platform-version':'Windows Chrome 127',
-        'x-app-version':'7.0.0',
-        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-        'content-type':'application/json',
-        'accept':'application/json',
-        'x-device-platform':'Web',
-        'x-client-name':'magnit',
-        'x-device-id':'1A5D0A5D-8C76-CEC4-D837-622100832565'
+        'host': 'magnit.ru',
+        'x-device-tag': 'disabled',
+        'x-platform-version': 'Windows Chrome 127',
+        'x-app-version': '7.0.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+        'content-type': 'application/json',
+        'accept': 'application/json',
+        'x-device-platform': 'Web',
+        'x-client-name': 'magnit',
+        'x-device-id': '1A5D0A5D-8C76-CEC4-D837-622100832565'
     }
-    params = {"includeForAdults":True,"term":name,"pagination":{"offset":0,"limit":6},"sort":{"order":"desc","type":"popularity"},"storeCode":"559060","storeType":"1","catalogType":"1"}
-    headers['Content-Length']= str(len(dumps(params)))
+    params = {"includeForAdults": True, "term": name, "pagination": {"offset": 0, "limit": 6}, "sort": {"order": "desc", "type": "popularity"}, "storeCode": "559060", "storeType": "1", "catalogType": "1"}
+    headers['Content-Length'] = str(len(dumps(params)))
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post('https://magnit.ru/webgate/v2/goods/search', headers=headers, json=params) as response:
             data = await response.json()
@@ -102,10 +139,10 @@ async def magnitAPI(name):
         "store_name": "Магнит",
         "image_url": item["gallery"][0]['url'],
         "actionDate": "",
-        "discountPercent": f"-{round(100 - float(item['price'])  * 100 / float(item['promotion']['oldPrice']))}%" if item['promotion'].get('oldPrice') else None,
+        "discountPercent": f"-{round(100 - float(item['price']) * 100 / float(item['promotion']['oldPrice']))}%" if item['promotion'].get('oldPrice') else None,
         "discount": True if item['promotion'].get('oldPrice') else False,
-        "price": item['price']/100,
-        "oldprice":  item['promotion']['oldPrice']/100 if item['promotion'].get('oldPrice') else None,
+        "price": item['price'] / 100,
+        "oldprice": item['promotion']['oldPrice'] / 100 if item['promotion'].get('oldPrice') else None,
     } for item in data["items"]]
     return items
 
@@ -153,7 +190,7 @@ class PerekrestokAPI:
             async with session.post(self.token_url, headers=headers, json=data) as response:
                 content = await response.json()
         return content
-    
+
     async def parse(self, name):
         if self.perekrestok_token == '':
             self.perekrestok_token = await self.get_token()
@@ -174,50 +211,64 @@ class PerekrestokAPI:
         return items
 
 @app.get("/search/{text}")
-async def search(text):
+async def search(text: str):
     async def safe_call(api_call):
         try:
             return await api_call
         except Exception as e:
             print(f"Error during API call: {e}")
             return []
+
+    # Выполняем поиск в различных API
     perekrestok = PerekrestokAPI()
     one = time()
     results = await asyncio.gather(safe_call(magnitAPI(text)),
                                    safe_call(perekrestok.parse(text)),
                                    safe_call(ashanAPI(text)))
-                                   
-    print(time()-one)
-    final_result_1 = {}
+
     final_result = [item for sublist in results if sublist for item in sublist]
-    final_result_1['result'] = final_result 
+
+    # Извлекаем названия продуктов для добавления в кластер
+    new_products = [{"name": item['name'], "price": item['price']} for item in final_result]
+
+    # Добавляем новые продукты в систему рекомендаций
+    await recommendation_system.add_new_products(new_products)
+
+    final_result_1 = {'result': final_result}
+    print(time() - one)
+
     return JSONResponse(final_result_1)
 
-@app.get("/magnit/{text}")
-async def magnit(text):
-    result = await magnitAPI(text)
-    result_1 = {}
-    result_1['result'] = result 
-    return JSONResponse(result_1)
+@app.post("/cluster")
+async def get_cluster(data: dict):
+    target_product = data.get("target_product")
 
-@app.get("/lenta/{text}")
-async def lenta(text):
-    result = await lentaAPI(text)
-    result_1 = {}
-    result_1['result'] = result 
-    return JSONResponse(result_1)
+    if not target_product:
+        raise HTTPException(status_code=400, detail="target_product is required")
+
+    # Ищем ближайший кластер для целевого продукта
+    closest_cluster = await recommendation_system.find_closest_cluster(target_product)
+
+    return JSONResponse(closest_cluster)
+
+@app.get("/magnit/{text}")
+async def magnit(text: str):
+    result = await magnitAPI(text)
+    new_products = [{"name": item['name'], "price": item['price']} for item in result]
+    await recommendation_system.add_new_products(new_products)
+    return JSONResponse({"result": result})
 
 @app.get("/perekrestok/{text}")
-async def magnit(text):
+async def perekrestok(text: str):
     perekrestok = PerekrestokAPI()
     result = await perekrestok.parse(text)
-    result_1 = {}
-    result_1['result'] = result 
-    return JSONResponse(result_1)
+    new_products = [{"name": item['name'], "price": item['price']} for item in result]
+    await recommendation_system.add_new_products(new_products)
+    return JSONResponse({"result": result})
 
 @app.get("/ashan/{text}")
-async def ashat(text):
+async def ashan(text: str):
     result = await ashanAPI(text)
-    result_1 = {}
-    result_1['result'] = result 
-    return JSONResponse(result_1)
+    new_products = [{"name": item['name'], "price": item['price']} for item in result]
+    await recommendation_system.add_new_products(new_products)
+    return JSONResponse({"result": result})
