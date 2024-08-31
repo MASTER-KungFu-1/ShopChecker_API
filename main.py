@@ -29,7 +29,7 @@ class RecommendationSystem:
             "кола": "cola",
             "Cola": "cola",
             "cola": "cola",
-            # Добавьте другие синонимы, если нужно
+
         }
         for word, replacement in synonyms.items():
             text = text.replace(word, replacement)
@@ -66,7 +66,7 @@ class RecommendationSystem:
 
     async def find_closest_cluster(self, product_name):
         if not self.products:
-            raise HTTPException(status_code=404, detail="No products available for clustering")
+            raise HTTPException(status_code=404, detail="Нет доступных товаров для кластеризации")
 
         vector = self.vectorizer.transform([self.synonym_replacer(product_name)])
         similarity_scores = cosine_similarity(vector, self.vectorizer.transform([p['name'] for p in self.products])).flatten()
@@ -229,7 +229,7 @@ async def search(text: str):
     final_result = [item for sublist in results if sublist for item in sublist]
 
     # Извлекаем названия продуктов для добавления в кластер
-    new_products = [{"name": item['name'], "price": item['price']} for item in final_result]
+    new_products = [{"name": item['name'], "price": item['price'], "store_name": item['store_name'], "image_url": item['image_url'], 'oldprice':item['oldprice']} for item in final_result]
 
     # Добавляем новые продукты в систему рекомендаций
     await recommendation_system.add_new_products(new_products)
@@ -241,15 +241,34 @@ async def search(text: str):
 
 @app.post("/cluster")
 async def get_cluster(data: dict):
-    target_product = data.get("target_product")
+    if "products" in data.keys():
+        info = data['products']
+        result = []
+        final_result = {}
+        for i in info: 
+            target_product = i.get("target_product")
 
-    if not target_product:
-        raise HTTPException(status_code=400, detail="target_product is required")
+            
 
-    # Ищем ближайший кластер для целевого продукта
-    closest_cluster = await recommendation_system.find_closest_cluster(target_product)
+            if not target_product:
+                raise HTTPException(status_code=400, detail="Похожие товары не найдены, проверьте правильность отправленного типа данных!")
 
-    return JSONResponse(closest_cluster)
+            
+            closest_cluster = await recommendation_system.find_closest_cluster(target_product)
+            result.append(closest_cluster)
+        final_result['result'] = result
+        return JSONResponse(final_result,)
+    else:
+        target_product = data.get("target_product")
+
+        
+
+        if not target_product:
+            raise HTTPException(status_code=400, detail="Похожие товары не найдены, проверьте правильность отправленного типа данных!")
+
+        closest_cluster = await recommendation_system.find_closest_cluster(target_product)
+
+        return JSONResponse(closest_cluster)
 
 @app.get("/magnit/{text}")
 async def magnit(text: str):
