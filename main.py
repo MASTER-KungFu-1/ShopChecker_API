@@ -224,11 +224,7 @@ class PerekrestokAPI:
 
         return items
     
-def save_searching_items(items_list:list):
-    s=  {'items':items_list}
 
-    with open('searching_items.json', 'w') as f:
-        dumps(s, f)
 
 @app.get("/search/{text}")
 async def search(text: str):
@@ -236,7 +232,6 @@ async def search(text: str):
         try:
             return await api_call
         except Exception as e:
-            print(f"Ошибка API: {e}")
             return []
 
     
@@ -263,7 +258,7 @@ async def search(text: str):
     await recommendation_system.add_new_products(new_products)
 
     final_result_1 = {'result': final_result}
-    print(time() - one)
+    
 
     return JSONResponse(final_result_1)
 
@@ -284,9 +279,8 @@ async def get_cluster(data: dict):
             
             closest_cluster = await recommendation_system.find_closest_cluster(target_product)
             result.append(closest_cluster)
-            save_searching_items(result)
         final_result['result'] = result
-        return JSONResponse(final_result,)
+        return JSONResponse(final_result)
     else:
         target_product = data.get("name")
 
