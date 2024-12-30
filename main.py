@@ -2,20 +2,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import asyncio
 import aiohttp
-from json import loads
+from json import loads,dumps
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from urllib.parse import unquote_plus
-from json import dumps
-
-import asyncio
-import aiohttp
 from time import time
 
 app = FastAPI()
 
 timeout = aiohttp.ClientTimeout(total=5)
 app = FastAPI()
+
+
+searching_items = []
 
 class RecommendationSystem:
     def __init__(self):
@@ -155,7 +154,19 @@ class PerekrestokAPI:
 
     async def get_token(self):
         headers = {
-            'User-Agent': self.user_agent,
+            "accept": "*/*",
+            "accept-language": "ru,en;q=0.9",
+            "sec-ch-ua": "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\", \"YaBrowser\";v=\"23\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "x-app-version": "0.1.0",
+            "x-device-id": "nk1kmh32na",
+            "x-device-platform": "Web",
+            "x-device-tag": "disabled",
+            "x-platform-version": "window.navigator.userAgent"
         }
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(self.main_url, headers=headers) as response:
@@ -208,7 +219,16 @@ class PerekrestokAPI:
             "price": str(item['priceTag']['price'] / 100).replace('.', ','),
             "oldprice": str(item['priceTag']['grossPrice'] / 100).replace('.', ',') if item['priceTag'].get('grossPrice') else None
         } for item in content['content']['items']]
+
+    
+
         return items
+    
+def save_searching_items(items_list:list):
+    s=  {'items':items_list}
+
+    with open('searching_items.json', 'w') as f:
+        dumps(s, f)
 
 @app.get("/search/{text}")
 async def search(text: str):
@@ -216,10 +236,10 @@ async def search(text: str):
         try:
             return await api_call
         except Exception as e:
-            print(f"Error during API call: {e}")
+            print(f"Ошибка API: {e}")
             return []
 
-    # Выполняем поиск в различных API
+    
     perekrestok = PerekrestokAPI()
     one = time()
     results = await asyncio.gather(safe_call(magnitAPI(text)),
@@ -227,9 +247,17 @@ async def search(text: str):
                                    safe_call(ashanAPI(text)))
 
     final_result = [item for sublist in results if sublist for item in sublist]
+    if searching_items.count(text) < 50:
+        searching_items.append(text)
+
+    else:
+        searching_items.append(text) 
+        searching_items.pop(0)       
+        
+        
 
     # Извлекаем названия продуктов для добавления в кластер
-    new_products = [{"name": item['name'], "price": item['price'], "store_name": item['store_name'], "image_url": item['image_url'], 'oldprice':item['oldprice']} for item in final_result]
+    new_products = [{"name": item['name'], "price": item['price'], "store_name": item['store_name'], "image_url": item['image_url'] , 'oldprice':item['oldprice']} for item in final_result]
 
     # Добавляем новые продукты в систему рекомендаций
     await recommendation_system.add_new_products(new_products)
@@ -246,7 +274,7 @@ async def get_cluster(data: dict):
         result = []
         final_result = {}
         for i in info: 
-            target_product = i.get("target_product")
+            target_product = i.get("name")
 
             
 
@@ -256,10 +284,11 @@ async def get_cluster(data: dict):
             
             closest_cluster = await recommendation_system.find_closest_cluster(target_product)
             result.append(closest_cluster)
+            save_searching_items(result)
         final_result['result'] = result
         return JSONResponse(final_result,)
     else:
-        target_product = data.get("target_product")
+        target_product = data.get("name")
 
         
 
