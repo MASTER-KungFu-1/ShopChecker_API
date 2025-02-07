@@ -2,42 +2,70 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import asyncio
 import aiohttp
-from json import loads,dumps
+from json import loads, dumps
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from urllib.parse import unquote_plus
 from time import time
 
-app = FastAPI()
+# Дополнительные импорты для обработки цены
+from sklearn.preprocessing import StandardScaler
+from scipy.sparse import hstack, csr_matrix
 
+app = FastAPI()
 timeout = aiohttp.ClientTimeout(total=5)
-app = FastAPI()
-
 
 searching_items = []
 
 class RecommendationSystem:
     def __init__(self):
         self.clusters = []
+        # Перед обработкой названий будет применяться функция synonym_replacer
         self.vectorizer = TfidfVectorizer(preprocessor=self.synonym_replacer)
         self.products = []  
         self.similarity_matrix = None
+        self.combined_features = None
+        self.price_scaler = None
 
     def synonym_replacer(self, text):
         synonyms = {
             "кола": "cola",
             "Cola": "cola",
             "cola": "cola",
-
         }
         for word, replacement in synonyms.items():
             text = text.replace(word, replacement)
         return text
 
     def preprocess_products(self):
-        # Используем только название для векторизации
-        X = self.vectorizer.fit_transform([p['name'] for p in self.products])
-        self.similarity_matrix = cosine_similarity(X)
+        # Векторизация названий товаров после замены синонимов
+        names = [self.synonym_replacer(p['name']) for p in self.products]
+        name_features = self.vectorizer.fit_transform(names)
+        
+        # Обработка цены: преобразуем значение в число (учитывая возможные запятые)
+        price_list = []
+        for p in self.products:
+            try:
+                price_str = p['price']
+                if isinstance(price_str, str):
+                    price_str = price_str.replace(',', '.')
+                price_val = float(price_str)
+            except Exception as e:
+                price_val = 0.0
+            price_list.append([price_val])
+        
+        # Нормализуем цены с помощью StandardScaler
+        scaler = StandardScaler()
+        price_features = scaler.fit_transform(price_list)
+        self.price_scaler = scaler  # сохраняем для последующей обработки запроса
+        
+        # Преобразуем числовой признак в разреженную матрицу и объединяем с вектором названия
+        price_features_sparse = csr_matrix(price_features)
+        combined_features = hstack([name_features, price_features_sparse])
+        self.combined_features = combined_features
+        
+        # Пересчитываем матрицу сходства с учетом объединённых признаков
+        self.similarity_matrix = cosine_similarity(combined_features)
 
     def cluster_products(self, threshold=0.55):
         visited = set()
@@ -63,27 +91,72 @@ class RecommendationSystem:
             self.preprocess_products()
             self.cluster_products()
 
-    async def find_closest_cluster(self, product_name):
+    async def find_closest_cluster(self, product_name, product_price=None, exclude_products=None):
         if not self.products:
             raise HTTPException(status_code=404, detail="Нет доступных товаров для кластеризации")
 
-        vector = self.vectorizer.transform([self.synonym_replacer(product_name)])
-        similarity_scores = cosine_similarity(vector, self.vectorizer.transform([p['name'] for p in self.products])).flatten()
+        # Обработка названия и создание вектора TF-IDF
+        processed_name = self.synonym_replacer(product_name)
+        name_vector = self.vectorizer.transform([processed_name])
+        
+        # Обработка цены: если передана цена, преобразуем её, иначе по умолчанию 0.0
+        if product_price is not None:
+            try:
+                price_val = float(str(product_price).replace(',', '.'))
+            except:
+                price_val = 0.0
+        else:
+            price_val = 0.0
 
+        price_feature = self.price_scaler.transform([[price_val]])
+        price_feature_sparse = csr_matrix(price_feature)
+        
+        # Формируем объединённый вектор признаков запроса
+        query_vector = hstack([name_vector, price_feature_sparse])
+        similarity_scores = cosine_similarity(query_vector, self.combined_features).flatten()
+        
         closest_cluster = None
         max_similarity = 0
         for cluster in self.clusters:
-            cluster_similarity = max([similarity_scores[self.products.index(prod)] for prod in cluster])
+            if not cluster:
+                continue
+            cluster_scores = []
+            for prod in cluster:
+                try:
+                    idx = self.products.index(prod)
+                    cluster_scores.append(similarity_scores[idx])
+                except ValueError:
+                    continue
+            cluster_similarity = max(cluster_scores) if cluster_scores else 0
             if cluster_similarity > max_similarity:
                 max_similarity = cluster_similarity
                 closest_cluster = cluster
-
-        if closest_cluster:
-            return {"cluster": closest_cluster}
-        else:
+        
+        if closest_cluster is None:
             return {"cluster": []}
+        
+        # Исключаем из результата те товары, которые были переданы в запросе
+        if exclude_products:
+            def product_match(p1, p2):
+                try:
+                    if p1.get("name") == p2.get("name") and p1.get("store_name") == p2.get("store_name"):
+                        p1_price = float(str(p1.get("price")).replace(',', '.'))
+                        p2_price = float(str(p2.get("price")).replace(',', '.'))
+                        return abs(p1_price - p2_price) < 0.01
+                    return False
+                except Exception as e:
+                    return False
+            filtered_cluster = []
+            for prod in closest_cluster:
+                if not any(product_match(prod, ex) for ex in exclude_products):
+                    filtered_cluster.append(prod)
+            closest_cluster = filtered_cluster
+
+        return {"cluster": closest_cluster}
 
 recommendation_system = RecommendationSystem()
+
+
 
 async def ashanAPI(text):
     params = {
@@ -170,8 +243,8 @@ class PerekrestokAPI:
         }
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(self.main_url, headers=headers) as response:
-                session = response.cookies.get("session")
-        session_cookie = loads(unquote_plus(session.value))
+                session_cookie = response.cookies.get("session")
+        session_cookie = loads(unquote_plus(session_cookie.value))
         return session_cookie['accessToken']
 
     async def get_data(self, token, name):
@@ -219,12 +292,7 @@ class PerekrestokAPI:
             "price": str(item['priceTag']['price'] / 100).replace('.', ','),
             "oldprice": str(item['priceTag']['grossPrice'] / 100).replace('.', ',') if item['priceTag'].get('grossPrice') else None
         } for item in content['content']['items']]
-
-    
-
         return items
-    
-
 
 @app.get("/search/{text}")
 async def search(text: str):
@@ -233,64 +301,44 @@ async def search(text: str):
             return await api_call
         except Exception as e:
             return []
-
     
     perekrestok = PerekrestokAPI()
-    one = time()
     results = await asyncio.gather(safe_call(magnitAPI(text)),
                                    safe_call(perekrestok.parse(text)),
                                    safe_call(ashanAPI(text)))
-
     final_result = [item for sublist in results if sublist for item in sublist]
     if searching_items.count(text) < 50:
         searching_items.append(text)
-
     else:
-        searching_items.append(text) 
-        searching_items.pop(0)       
+        searching_items.append(text)
+        searching_items.pop(0)
         
-        
-
-    # Извлекаем названия продуктов для добавления в кластер
-    new_products = [{"name": item['name'], "price": item['price'], "store_name": item['store_name'], "image_url": item['image_url'] , 'oldprice':item['oldprice']} for item in final_result]
-
-    # Добавляем новые продукты в систему рекомендаций
+    # Формируем список продуктов для добавления в систему рекомендаций
+    new_products = [{"name": item['name'], "price": item['price'], "store_name": item['store_name'], "image_url": item.get('image_url'), "oldprice": item.get('oldprice')} for item in final_result]
     await recommendation_system.add_new_products(new_products)
-
-    final_result_1 = {'result': final_result}
-    
-
-    return JSONResponse(final_result_1)
+    return JSONResponse({"result": final_result})
 
 @app.post("/cluster")
 async def get_cluster(data: dict):
     if "products" in data.keys():
         info = data['products']
         result = []
-        final_result = {}
-        for i in info: 
-            target_product = i.get("name")
-
-            
-
-            if not target_product:
+        # Для каждого товара из входного списка ищем кластер с учетом его цены
+        # и передаём весь список входных товаров для исключения их из результата
+        for prod in info: 
+            target_name = prod.get("name")
+            target_price = prod.get("price")
+            if not target_name:
                 raise HTTPException(status_code=400, detail="Похожие товары не найдены, проверьте правильность отправленного типа данных!")
-
-            
-            closest_cluster = await recommendation_system.find_closest_cluster(target_product)
-            result.append(closest_cluster)
-        final_result['result'] = result
-        return JSONResponse(final_result)
+            cluster = await recommendation_system.find_closest_cluster(target_name, target_price, exclude_products=info)
+            result.append(cluster)
+        return JSONResponse({"result": result})
     else:
-        target_product = data.get("name")
-
-        
-
-        if not target_product:
+        target_name = data.get("name")
+        target_price = data.get("price")
+        if not target_name:
             raise HTTPException(status_code=400, detail="Похожие товары не найдены, проверьте правильность отправленного типа данных!")
-
-        closest_cluster = await recommendation_system.find_closest_cluster(target_product)
-
+        closest_cluster = await recommendation_system.find_closest_cluster(target_name, target_price)
         return JSONResponse(closest_cluster)
 
 @app.get("/magnit/{text}")
